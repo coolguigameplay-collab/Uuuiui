@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Android Build
     runs-on: ubuntu-latest
 
     steps:
+
       # =========================================================
       # CHECKOUT
       # =========================================================
@@ -18,28 +22,32 @@ jobs:
         with:
           fetch-depth: 0
 
+
       # =========================================================
-      # HAXE
+      # HAXE 4.3.7
       # =========================================================
       - name: Setting up Haxe
         uses: krdlab/setup-haxe@v2
         with:
           haxe-version: 4.3.7
 
+
       # =========================================================
-      # ANDROID NDK
+      # ANDROID NDK r25c
       # =========================================================
       - name: Setup Android NDK
-        id: setup-ndk
         uses: nttld/setup-ndk@main
         with:
           ndk-version: r25c
 
+
       # =========================================================
-      # ENVIRONMENT
+      # ENVIRONMENT CHECK
       # =========================================================
       - name: Check Build Environment
         run: |
+          set -e
+
           echo "========================================"
           echo "HAXE"
           echo "========================================"
@@ -69,56 +77,80 @@ jobs:
           echo "========================================"
           java -version
 
+
       # =========================================================
-      # CLEAN OLD BUILD OUTPUT
+      # IMPORTANT:
+      # DO NOT RESTORE OLD NATIVE BUILD CACHE
       # =========================================================
-      - name: Clean Previous Android Build
+      - name: Clean Native Build Cache
         run: |
+          set -e
+
           rm -rf export/release/android
           rm -rf export/debug/android
 
-          echo "Old Android build output removed."
+          rm -rf ~/.lime
+          rm -rf ~/.gradle/caches
+
+          rm -rf export/android
+          rm -rf export/release/android/haxe
+          rm -rf export/release/android/obj
+
+          echo "Native build cache cleaned."
+
 
       # =========================================================
       # INSTALL / UPDATE LIBRARIES
       # =========================================================
       - name: Installing/Updating libraries
         run: |
+          set -e
+
           haxe -cp commandline -D analyzer-optimize --run Main setup -s
 
+
       # =========================================================
-      # CHECK INSTALLED LIBRARIES
+      # SHOW LIBRARIES
       # =========================================================
-      - name: Verify Haxelib Libraries
+      - name: Verify Haxelib
         run: |
+          set -e
+
           echo "========================================"
           echo "HAXELIB LIST"
           echo "========================================"
+
           haxelib list
 
           echo ""
           echo "========================================"
           echo "LIME PATH"
           echo "========================================"
+
           haxelib path lime
 
           echo ""
           echo "========================================"
           echo "HXCPP PATH"
           echo "========================================"
+
           haxelib path hxcpp
 
           echo ""
           echo "========================================"
           echo "FLIXEL PATH"
           echo "========================================"
+
           haxelib path flixel
+
 
       # =========================================================
       # CONFIGURE LIME
       # =========================================================
       - name: Configure Android
         run: |
+          set -e
+
           haxelib run lime setup -alias -y
 
           haxelib run lime config ANDROID_SDK "$ANDROID_HOME"
@@ -126,91 +158,226 @@ jobs:
           haxelib run lime config JAVA_HOME "$JAVA_HOME_17_X64"
           haxelib run lime config ANDROID_SETUP true
 
+
       # =========================================================
-      # VERIFY LIME CONFIGURATION
+      # VERIFY LIME
       # =========================================================
-      - name: Verify Lime Configuration
+      - name: Verify Lime
         run: |
+          set -e
+
           echo "========================================"
           echo "LIME VERSION"
           echo "========================================"
+
           haxelib run lime --version
 
           echo ""
           echo "========================================"
-          echo "ANDROID NDK"
+          echo "LIME PATH"
           echo "========================================"
-          echo "$ANDROID_NDK_HOME"
+
+          haxelib path lime
 
           echo ""
           echo "========================================"
-          echo "ANDROID SDK"
+          echo "NDK"
           echo "========================================"
-          echo "$ANDROID_HOME"
 
-          echo ""
-          echo "========================================"
-          echo "JAVA HOME"
-          echo "========================================"
-          echo "$JAVA_HOME_17_X64"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            --version
+
 
       # =========================================================
       # BUILD
       # =========================================================
       - name: Building the game
         run: |
+          set -e
+
           haxelib run lime build android -final -D ONLY_ARM64
 
+
       # =========================================================
-      # INSPECT APK NATIVE LIBRARIES
+      # FIND APK
       # =========================================================
-      - name: Inspect APK Native Libraries
-        shell: bash
+      - name: Locate APK
+        id: apk
         run: |
-          APK=$(find export/release/android/bin/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          set -e
+
+          APK=$(find \
+            export/release/android/bin/app/build/outputs/apk/release \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not found."
+            echo "ERROR: APK was not generated."
             exit 1
           fi
 
+          echo "APK=$APK" >> "$GITHUB_OUTPUT"
+
+          echo ""
           echo "APK:"
           echo "$APK"
 
-          echo ""
-          echo "========================================"
-          echo "APK LIBRARIES"
-          echo "========================================"
 
-          unzip -l "$APK" | grep "lib/arm64-v8a/.*\.so" || true
+      # =========================================================
+      # EXTRACT NATIVE LIBRARIES
+      # =========================================================
+      - name: Extract Native Libraries
+        run: |
+          set -e
 
-          echo ""
-          echo "========================================"
-          echo "CHECK libc++_shared.so"
-          echo "========================================"
+          mkdir -p native-inspect
 
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libc++_shared.so"; then
-            echo "libc++_shared.so FOUND"
-          else
-            echo "WARNING: libc++_shared.so NOT FOUND"
-          fi
+          unzip -o \
+            "${{ steps.apk.outputs.APK }}" \
+            "lib/arm64-v8a/*.so" \
+            -d native-inspect
 
           echo ""
           echo "========================================"
-          echo "CHECK liblime.so"
+          echo "ARM64 NATIVE LIBRARIES"
           echo "========================================"
 
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/liblime.so"; then
-            echo "liblime.so FOUND"
-          else
-            echo "ERROR: liblime.so NOT FOUND"
+          find native-inspect/lib/arm64-v8a \
+            -type f \
+            -name "*.so" \
+            -print
+
+
+      # =========================================================
+      # CHECK liblime.so
+      # =========================================================
+      - name: Inspect liblime.so
+        run: |
+          set -e
+
+          LIME="native-inspect/lib/arm64-v8a/liblime.so"
+
+          if [ ! -f "$LIME" ]; then
+            echo "ERROR: liblime.so is missing."
             exit 1
           fi
+
+          echo "========================================"
+          echo "liblime.so DEPENDENCIES"
+          echo "========================================"
+
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -d "$LIME" \
+            | grep NEEDED || true
+
+          echo ""
+          echo "========================================"
+          echo "__emutls_get_address"
+          echo "========================================"
+
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -Ws "$LIME" \
+            | grep "__emutls_get_address" || true
+
+
+      # =========================================================
+      # CHECK libc++_shared.so
+      # =========================================================
+      - name: Inspect libc++_shared.so
+        run: |
+          set -e
+
+          LIBCXX="native-inspect/lib/arm64-v8a/libc++_shared.so"
+
+          if [ ! -f "$LIBCXX" ]; then
+            echo "WARNING: libc++_shared.so is not present."
+            exit 0
+          fi
+
+          echo "========================================"
+          echo "libc++_shared.so SYMBOL"
+          echo "========================================"
+
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -Ws "$LIBCXX" \
+            | grep "__emutls_get_address" || true
+
+
+      # =========================================================
+      # CHECK ALL LIBRARIES FOR THE SYMBOL
+      # =========================================================
+      - name: Find emutls symbol providers
+        run: |
+          set -e
+
+          READelf="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          echo "========================================"
+          echo "SEARCHING ALL ARM64 LIBRARIES"
+          echo "========================================"
+
+          FOUND=0
+
+          for LIB in native-inspect/lib/arm64-v8a/*.so; do
+            if "$READelf" -Ws "$LIB" 2>/dev/null \
+              | grep -q "__emutls_get_address"; then
+
+              echo ""
+              echo "FOUND IN:"
+              echo "$LIB"
+
+              "$READelf" -Ws "$LIB" \
+                | grep "__emutls_get_address"
+
+              FOUND=1
+            fi
+          done
+
+          echo ""
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No __emutls_get_address symbol found."
+          fi
+
+
+      # =========================================================
+      # APK CONTENT CHECK
+      # =========================================================
+      - name: Verify APK Contents
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "ARM64 APK LIBRARIES"
+          echo "========================================"
+
+          unzip -l "${{ steps.apk.outputs.APK }}" \
+            | grep "lib/arm64-v8a/.*\.so" \
+            || true
+
+          echo ""
+          echo "========================================"
+          echo "liblime.so"
+          echo "========================================"
+
+          if unzip -l "${{ steps.apk.outputs.APK }}" \
+            | grep -q "lib/arm64-v8a/liblime.so"; then
+
+            echo "OK: liblime.so exists."
+
+          else
+
+            echo "ERROR: liblime.so missing."
+            exit 1
+
+          fi
+
 
       # =========================================================
       # UPLOAD APK
       # =========================================================
-      - name: Uploading APK
+      - name: Uploading Android APK
         uses: actions/upload-artifact@v4
         with:
           name: Codename Engine Android
